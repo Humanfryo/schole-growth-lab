@@ -1,5 +1,4 @@
-import { Insights } from "./insights";
-import { ANGLE_LABEL, CTA_LABEL } from "./types";
+import { Angle, ANGLE_LABEL, CTA_LABEL, CTAType } from "./types";
 import { VariantPlan } from "./variant";
 
 export interface VariantCopy {
@@ -8,12 +7,21 @@ export interface VariantCopy {
   sections: { heading: string; body: string }[];
 }
 
+// Only the fields the prompt actually needs — a slim, serializable payload the
+// client can POST without dragging the fitted model (which holds functions).
+export interface PromptInsights {
+  winningAngle: Angle;
+  bestCTA: CTAType;
+  losingAngle: Angle;
+  segmentWinners: { segmentName: string; topAngle: Angle }[];
+}
+
 // The LLM's job is deliberately narrow: write the COPY for a page structure the
 // optimizer already decided from data. It never picks the strategy — that keeps
 // the feature vector honest and the experiment reproducible.
 export function buildVariantPrompt(
   plan: VariantPlan,
-  insights: Insights
+  insights: PromptInsights
 ): { system: string; user: string } {
   const system = [
     "You are a senior growth copywriter for Scholé, an AI-native, role-based upskilling platform for enterprises (adaptive 2-minute lessons, an AI tutor called Ask Olé, HR adoption dashboards, built on EPFL + UC Berkeley learning-science research).",

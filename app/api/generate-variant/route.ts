@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Insights } from "@/lib/insights";
-import { buildVariantPrompt, parseVariantCopy } from "@/lib/variantPrompt";
+import { buildVariantPrompt, parseVariantCopy, PromptInsights } from "@/lib/variantPrompt";
 import { VariantPlan } from "@/lib/variant";
 
 export const runtime = "nodejs";
 
 interface Body {
   plan: VariantPlan;
-  insights: Insights;
+  insights: PromptInsights;
 }
 
 // Generates landing-page COPY for a data-derived slot plan using an LLM via
@@ -25,8 +24,19 @@ export async function POST(req: NextRequest) {
   if (!plan?.slots?.length) {
     return NextResponse.json({ error: "missing plan" }, { status: 400 });
   }
+  const safeInsights = normalizeInsights(insights);
+  if (!safeInsights) {
+    return NextResponse.json({ error: "invalid insights" }, { status: 400 });
+  }
 
-  const { system, user } = buildVariantPrompt(plan, insights);
+  // build the prompt defensively — a malformed plan must never 500
+  let system: string;
+  let user: string;
+  try {
+    ({ system, user } = buildVariantPrompt(plan, safeInsights));
+  } catch {
+    return NextResponse.json({ error: "could not build prompt" }, { status: 400 });
+  }
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = process.env.OPENROUTER_MODEL || "anthropic/claude-3.5-sonnet";
 
@@ -77,10 +87,12 @@ export async function POST(req: NextRequest) {
     const raw: string = data?.choices?.[0]?.message?.content ?? "";
     const copy = parseVariantCopy(raw, plan.slots.length);
 
-    if (!copy) {
+    // require a full-length copy array before claiming LLM authorship —
+    // otherwise the page is mostly fallback copy and the "by {model}" badge lies
+    if (!copy || copy.sections.length < plan.slots.length) {
       return NextResponse.json({
         source: "fallback",
-        reason: "could not parse LLM JSON",
+        reason: copy ? "LLM returned too few sections" : "could not parse LLM JSON",
         model,
         prompt: { system, user },
         raw,
@@ -102,4 +114,27 @@ export async function POST(req: NextRequest) {
       prompt: { system, user },
     });
   }
+}
+
+const ANGLE_SET = new Set(["roi", "pain", "personalization", "research", "speed"]);
+const CTA_SET = new Set(["demo", "trial", "soft"]);
+
+// Coerce an untrusted insights payload into the slim shape the prompt needs, or
+// null if it's unusable.
+function normalizeInsights(i: unknown): PromptInsights | null {
+  if (!i || typeof i !== "object") return null;
+  const o = i as Record<string, unknown>;
+  if (!ANGLE_SET.has(o.winningAngle as string)) return null;
+  if (!ANGLE_SET.has(o.losingAngle as string)) return null;
+  if (!CTA_SET.has(o.bestCTA as string)) return null;
+  const segs = Array.isArray(o.segmentWinners) ? o.segmentWinners : [];
+  const segmentWinners = segs
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === "object" && ANGLE_SET.has((s as Record<string, unknown>).topAngle as string))
+    .map((s) => ({ segmentName: String(s.segmentName ?? "segment"), topAngle: s.topAngle as PromptInsights["segmentWinners"][number]["topAngle"] }));
+  return {
+    winningAngle: o.winningAngle as PromptInsights["winningAngle"],
+    bestCTA: o.bestCTA as PromptInsights["bestCTA"],
+    losingAngle: o.losingAngle as PromptInsights["losingAngle"],
+    segmentWinners,
+  };
 }

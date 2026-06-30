@@ -78,24 +78,28 @@ export function AllocationChart({
   );
 }
 
-// Cumulative conversion rate of the bandit vs. the even-split counterfactual.
+// Cumulative conversion rate of the bandit, framed by the two honest baselines:
+// the even split (floor) and always-serve-the-best-arm / oracle (ceiling). The
+// gap between Thompson and the oracle is the regret the bandit is closing.
 export function ConversionChart({ experiment }: { experiment: ExperimentResult }) {
   const data = experiment.rounds.map((r) => ({
     round: r.round,
     thompson: r.cumConvRate * 100,
-    uniform: experiment.uniformConvRate * 100,
+    even: experiment.uniformConvRate * 100,
+    bestArm: experiment.bestArmRate * 100,
   }));
+
+  const labelFor: Record<string, string> = {
+    thompson: "Bandit (Thompson)",
+    even: "Even split (floor)",
+    bestArm: "Best arm / oracle (ceiling)",
+  };
 
   return (
     <ResponsiveContainer width="100%" height={240}>
       <LineChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f3" vertical={false} />
-        <XAxis
-          dataKey="round"
-          tick={{ fontSize: 11, fill: "#a1a1aa" }}
-          axisLine={false}
-          tickLine={false}
-        />
+        <XAxis dataKey="round" tick={{ fontSize: 11, fill: "#a1a1aa" }} axisLine={false} tickLine={false} />
         <YAxis
           tick={{ fontSize: 11, fill: "#a1a1aa" }}
           axisLine={false}
@@ -103,33 +107,15 @@ export function ConversionChart({ experiment }: { experiment: ExperimentResult }
           tickFormatter={(v) => `${v.toFixed(0)}%`}
         />
         <Tooltip
-          formatter={(value, name) => [
-            `${Number(value).toFixed(1)}%`,
-            name === "thompson" ? "Bandit (Thompson)" : "Even split",
-          ]}
+          formatter={(value, name) => [`${Number(value).toFixed(1)}%`, labelFor[String(name)] ?? String(name)]}
           labelFormatter={(l) => `Round ${l}`}
           contentStyle={{ borderRadius: 12, border: "1px solid #e4e4e7", fontSize: 12 }}
         />
-        <ReferenceLine
-          y={experiment.uniformConvRate * 100}
-          stroke="#a1a1aa"
-          strokeDasharray="4 4"
-        />
-        <Line
-          type="monotone"
-          dataKey="uniform"
-          stroke="#a1a1aa"
-          strokeWidth={1.5}
-          strokeDasharray="4 4"
-          dot={false}
-        />
-        <Line
-          type="monotone"
-          dataKey="thompson"
-          stroke="#7c3aed"
-          strokeWidth={2.5}
-          dot={{ r: 2.5, fill: "#7c3aed" }}
-        />
+        <ReferenceLine y={experiment.bestArmRate * 100} stroke="#059669" strokeDasharray="4 4" />
+        <ReferenceLine y={experiment.uniformConvRate * 100} stroke="#a1a1aa" strokeDasharray="4 4" />
+        <Line type="monotone" dataKey="bestArm" stroke="#059669" strokeWidth={1.5} strokeDasharray="4 4" dot={false} />
+        <Line type="monotone" dataKey="even" stroke="#a1a1aa" strokeWidth={1.5} strokeDasharray="4 4" dot={false} />
+        <Line type="monotone" dataKey="thompson" stroke="#7c3aed" strokeWidth={2.5} dot={{ r: 2.5, fill: "#7c3aed" }} />
       </LineChart>
     </ResponsiveContainer>
   );

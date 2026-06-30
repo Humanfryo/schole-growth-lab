@@ -1,99 +1,74 @@
-// Calibration harness: run the DGP and print the dynamics we care about, so we
-// can tune constants before wiring the UI. Run with: npx tsx scripts/calibrate.ts
-import { runExperiment } from "../lib/bandit";
-import { computeInsights } from "../lib/insights";
+// Verifies the whole rigor pipeline:
+//   explore -> fit response model -> race (bandit) -> optimize variant ->
+//   honest same-pass lift -> multi-seed lift -> evolution -> per-segment targeting.
+// Run: npx tsx scripts/calibrate.ts
+import {
+  evaluateVariant,
+  multiSeedLift,
+  planAndRealize,
+  runEvolution,
+  runLab,
+} from "../lib/lab";
 import { SEED_PAGES } from "../lib/pages";
 import { PERSONAS } from "../lib/personas";
-import { sampleBehavior, trueLogit } from "../lib/simulate";
-import { sigmoid } from "../lib/rng";
+import { FEATURE_NAMES } from "../lib/regression";
+import { summarizeFit } from "../lib/insights";
+import { evaluateField } from "../lib/lab";
 import { ANGLE_LABEL } from "../lib/types";
-import { planVariant, realizeVariant } from "../lib/variant";
 
-console.log("=== TRUE conversion logit -> prob (no scroll gate), persona x page ===");
-const header = ["page".padEnd(20), ...PERSONAS.map((p) => p.name.slice(0, 10).padEnd(11))];
-console.log(header.join(""));
-for (const page of SEED_PAGES) {
-  const row = [`${page.id} ${page.name}`.padEnd(20)];
-  for (const persona of PERSONAS) {
-    const p = sigmoid(trueLogit(persona, page));
-    row.push((p * 100).toFixed(1).padEnd(11));
-  }
-  console.log(row.join(""));
+const lab = runLab(SEED_PAGES);
+
+console.log("=== Fitted response model (population) ===");
+for (const name of FEATURE_NAMES) {
+  const c = lab.model.population.coefByName[name];
+  console.log(`  ${name.padEnd(16)} ${c.value.toFixed(3).padStart(7)} ± ${c.se.toFixed(3)}`);
 }
+console.log("converged:", lab.model.population.converged, "visits:", lab.model.visits);
 
-console.log("\n=== Mixture true prob per page (share-weighted) ===");
-for (const page of SEED_PAGES) {
-  const mix = PERSONAS.reduce(
-    (s, persona) => s + persona.share * sigmoid(trueLogit(persona, page)),
-    0
-  );
-  console.log(`${page.id} ${page.name.padEnd(22)} ${(mix * 100).toFixed(2)}%`);
+console.log("\n=== Showcase leaderboard (clean equal-N) ===");
+for (const s of [...lab.behaviorStats].sort((a, b) => b.convRate - a.convRate)) {
+  console.log(`  ${s.pageId}  ${(s.convRate * 100).toFixed(2)}%  CI[${(s.ci[0] * 100).toFixed(1)}-${(s.ci[1] * 100).toFixed(1)}]`);
 }
 
-console.log("\n=== Experiment (5 seeds) ===");
-const config = { seed: 42, rounds: 20, visitorsPerRound: 400 };
-const result = runExperiment(SEED_PAGES, config);
-console.log("Final per-page (observed):");
-for (const s of [...result.stats].sort((a, b) => b.convRate - a.convRate)) {
-  console.log(
-    `  ${s.pageId}  conv=${(s.convRate * 100).toFixed(2)}%  visits=${s.visits}  ` +
-      `scroll=${(s.avgScrollDepth * 100).toFixed(0)}%  time=${s.avgTimeOnPage.toFixed(0)}s  ` +
-      `bounce=${(s.bounceRate * 100).toFixed(0)}%`
-  );
-}
-console.log(
-  `Thompson conv=${(result.thompsonConvRate * 100).toFixed(2)}%  ` +
-    `uniform conv=${(result.uniformConvRate * 100).toFixed(2)}%  ` +
-    `lift=${(((result.thompsonConvRate - result.uniformConvRate) / result.uniformConvRate) * 100).toFixed(0)}%`
-);
-console.log(
-  "Cum conv by round:",
-  result.rounds.map((r) => (r.cumConvRate * 100).toFixed(1)).join(" ")
-);
-console.log(
-  "Final allocation share:",
-  result.pageIds
-    .map((id) => {
-      const last = result.rounds[result.rounds.length - 1].allocation[id];
-      return `${id}:${last}`;
-    })
-    .join("  ")
-);
+const e = lab.experiment;
+console.log("\n=== Bandit ===");
+console.log(`  thompson=${(e.thompsonConvRate * 100).toFixed(2)}%  even-split=${(e.uniformConvRate * 100).toFixed(2)}%  best-arm=${(e.bestArmRate * 100).toFixed(2)}%`);
+console.log(`  cumulative regret=${e.cumRegret.toFixed(1)} conversions vs oracle`);
+console.log(`  winner=${e.bestPageId}  significant=${e.winnerSignificant}  pBest=${Object.entries(e.pBest).map(([k, v]) => `${k}:${(v * 100).toFixed(0)}%`).join(" ")}`);
 
-const behavior = sampleBehavior(SEED_PAGES, { seed: 99, perPage: 2000 });
-const insights = computeInsights(SEED_PAGES, behavior.stats);
-console.log("\n=== Behavior sample (uniform) per-page conv ===");
-for (const s of [...behavior.stats].sort((a, b) => b.convRate - a.convRate)) {
-  console.log(`  ${s.pageId} ${(s.convRate * 100).toFixed(2)}%  scroll=${(s.avgScrollDepth * 100).toFixed(0)}%  time=${s.avgTimeOnPage.toFixed(0)}s`);
-}
-console.log("\n=== Insights ===");
-console.log("Overall winner:", insights.overallWinner, insights.overallWinnerName);
-console.log(
-  "Angle ranking:",
-  insights.angleScores.map((a) => `${a.angle}=${(a.score * 100).toFixed(1)}%`).join("  ")
-);
-console.log(
-  "CTA ranking:",
-  insights.ctaScores.map((c) => `${c.type}=${(c.convRate * 100).toFixed(1)}%`).join("  ")
-);
-console.log("Hot angles:", insights.hotAngles.map((a) => `${a.angle}(+${a.lift.toFixed(1)}s)`).join("  "));
-console.log("Cold angles:", insights.coldAngles.map((a) => `${a.angle}(${a.allDwell.toFixed(1)}s)`).join("  "));
-console.log("Segments differ?", insights.segmentsDiffer);
-for (const sw of insights.segmentWinners) {
-  console.log(
-    `  ${sw.segmentName.padEnd(18)} -> ${sw.pageId} ${sw.pageName.padEnd(22)} ${(sw.convRate * 100).toFixed(1)}%  [${ANGLE_LABEL[sw.topAngle]}]`
-  );
+console.log("\n=== Insights (learned) ===");
+console.log("  winning angle:", ANGLE_LABEL[lab.insights.winningAngle], "| losing:", ANGLE_LABEL[lab.insights.losingAngle], "| bestCTA:", lab.insights.bestCTA);
+console.log("  segments differ?", lab.insights.segmentsDiffer);
+for (const sw of lab.insights.segmentWinners) {
+  console.log(`    ${sw.segmentName.padEnd(18)} -> ${sw.pageId} ${sw.pageName} (${(sw.convRate * 100).toFixed(1)}%)`);
 }
 
-console.log("\n=== Generate winner variant and re-run with 6 pages ===");
-const plan = planVariant(insights, SEED_PAGES, { id: "V1" });
-const variant = realizeVariant(plan);
-console.log("Variant:", variant.id, variant.name, "primary=", variant.primaryAngle, "secondary=", variant.secondaryAngle, "cta=", variant.cta.type);
-console.log("Variant true mixture prob:", (PERSONAS.reduce((s, p) => s + p.share * sigmoid(trueLogit(p, variant)), 0) * 100).toFixed(2) + "%");
-const pages2 = [...SEED_PAGES, variant];
-const result2 = runExperiment(pages2, { ...config, seed: 7 });
-console.log("Phase 2 final per-page:");
-for (const s of [...result2.stats].sort((a, b) => b.convRate - a.convRate)) {
-  console.log(`  ${s.pageId}  conv=${(s.convRate * 100).toFixed(2)}%  visits=${s.visits}`);
+console.log("\n=== Generated variant (optimized against the fit) ===");
+const { plan, variant } = planAndRealize(lab.insights, SEED_PAGES, { id: "V1" });
+console.log(`  ${variant.id}  primary=${plan.primaryAngle} secondary=${plan.secondaryAngle} cta=${plan.cta} proof=${plan.socialProof} spec=${plan.specificity} len=${plan.slots.length}`);
+console.log(`  predicted conv (model) = ${(plan.predictedConv * 100).toFixed(2)}%`);
+const ev = evaluateVariant(SEED_PAGES, variant);
+console.log(`  observed: variant=${(ev.variantRate * 100).toFixed(2)}% vs baseline ${ev.baselineId}=${(ev.baselineRate * 100).toFixed(2)}%  lift=${ev.liftPct.toFixed(1)}%  (same pass)`);
+console.log("  rationale:");
+for (const n of variant.rationale ?? []) console.log(`    - ${n.change}`);
+
+console.log("\n=== Multi-seed lift distribution ===");
+const ms = multiSeedLift(SEED_PAGES, lab.insights, 40);
+console.log(`  mean lift=${ms.meanLiftPct.toFixed(1)}%  95% CI[${ms.ciLow.toFixed(1)}, ${ms.ciHigh.toFixed(1)}]  win-rate=${(ms.winRate * 100).toFixed(0)}%  (n=${ms.n})`);
+
+console.log("\n=== Evolution (rises then plateaus; rejects weak variants) ===");
+const evo = runEvolution(SEED_PAGES, lab.insights, 4);
+for (const r of evo.rounds) {
+  console.log(`  round ${r.round}: ${r.variant.primaryAngle.padEnd(16)} pred=${(r.predictedConv * 100).toFixed(1)}% observed=${(r.observedRate * 100).toFixed(2)}% incumbent=${(r.incumbentRate * 100).toFixed(2)}% -> ${r.accepted ? "ACCEPT" : "reject"} (frontier ${(r.frontier * 100).toFixed(2)}%)`);
 }
-console.log("Phase 2 best page:", result2.bestPageId, "(want V1)");
+
+console.log("\n=== Per-segment targeting (optimized against each segment's fit) ===");
+for (const p of PERSONAS) {
+  const { plan: tp, variant: tv } = planAndRealize(lab.insights, SEED_PAGES, { id: `T-${p.id}`, forSegment: p.id, segName: p.name });
+  const { trueRates } = evaluateField([tv], 321, 1500);
+  console.log(`  ${p.name.padEnd(18)} -> lead ${tp.primaryAngle.padEnd(16)} cta=${tp.cta}`);
+  void trueRates;
+}
+
+console.log("\n(verification done)");
+void summarizeFit;

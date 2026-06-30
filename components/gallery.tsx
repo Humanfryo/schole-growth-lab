@@ -24,6 +24,9 @@ export function PreviewModal({
   if (!page) return null;
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Landing page preview: ${page.name}`}
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-zinc-900/40 p-4 backdrop-blur-sm sm:p-8"
       onClick={onClose}
     >
@@ -37,6 +40,8 @@ export function PreviewModal({
           </span>
           <button
             onClick={onClose}
+            autoFocus
+            aria-label="Close preview"
             className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/25"
           >
             Close ✕

@@ -1,9 +1,58 @@
+import { ResponseModel } from "./learn";
 import { PERSONA_BY_ID } from "./personas";
-import { Angle, ANGLES, ANGLE_LABEL, CTAType, PageSpec, PageStat } from "./types";
+import { Coefficient, FitResult } from "./regression";
+import { Angle, ANGLES, CTAType, PageSpec, PageStat } from "./types";
 
-export interface AngleScore {
+export interface AngleCoef {
   angle: Angle;
-  score: number; // emphasis-weighted conversion rate
+  coef: number;
+  ci: [number, number];
+}
+
+export interface CTACoef {
+  type: CTAType;
+  coef: number;
+  ci: [number, number];
+}
+
+// A human-readable summary of one fitted response model (population or segment).
+export interface FitSummary {
+  angleCoefs: AngleCoef[]; // sorted desc
+  ctaCoefs: CTACoef[]; // sorted desc; soft is the 0 baseline
+  proofCoef: Coefficient;
+  specCoef: Coefficient;
+  lengthCoef: Coefficient;
+  winningAngle: Angle;
+  secondAngle: Angle;
+  losingAngle: Angle;
+  bestCTA: CTAType;
+}
+
+export function summarizeFit(fit: FitResult): FitSummary {
+  const cb = fit.coefByName;
+  const angleCoefs: AngleCoef[] = ANGLES.map((angle) => ({
+    angle,
+    coef: cb[angle].value,
+    ci: cb[angle].ci,
+  })).sort((a, b) => b.coef - a.coef);
+
+  const ctaCoefs: CTACoef[] = [
+    { type: "demo" as CTAType, coef: cb.cta_demo.value, ci: cb.cta_demo.ci },
+    { type: "trial" as CTAType, coef: cb.cta_trial.value, ci: cb.cta_trial.ci },
+    { type: "soft" as CTAType, coef: 0, ci: [0, 0] as [number, number] },
+  ].sort((a, b) => b.coef - a.coef);
+
+  return {
+    angleCoefs,
+    ctaCoefs,
+    proofCoef: cb.socialProof,
+    specCoef: cb.specificity,
+    lengthCoef: cb.lengthNorm,
+    winningAngle: angleCoefs[0].angle,
+    secondAngle: angleCoefs[1].angle,
+    losingAngle: angleCoefs[angleCoefs.length - 1].angle,
+    bestCTA: ctaCoefs[0].type,
+  };
 }
 
 export interface SegmentWinner {
@@ -18,79 +67,40 @@ export interface SegmentWinner {
 
 export interface AngleDwell {
   angle: Angle;
-  convDwell: number; // avg dwell on this angle's sections among converters
-  allDwell: number; // avg dwell among all visitors
-  lift: number; // convDwell - allDwell
+  convDwell: number;
+  allDwell: number;
+  lift: number;
 }
 
-export interface Insights {
+export interface Insights extends FitSummary {
   overallWinner: string;
   overallWinnerName: string;
-  angleScores: AngleScore[];
-  winningAngle: Angle;
-  secondAngle: Angle;
-  losingAngle: Angle;
-  ctaScores: { type: CTAType; convRate: number; visits: number }[];
-  bestCTA: CTAType;
   hotAngles: AngleDwell[];
   coldAngles: AngleDwell[];
   segmentWinners: SegmentWinner[];
   segmentsDiffer: boolean;
+  model: ResponseModel;
 }
 
-// Turn raw experiment output into the patterns the optimizer "learned":
-// which angle wins, which CTA converts, which sections converters dwell on,
-// and crucially which page wins for which traffic segment.
-export function computeInsights(pages: PageSpec[], stats: PageStat[]): Insights {
-  const byId = new Map(pages.map((p) => [p.id, p]));
+export function computeInsights(
+  showcasePages: PageSpec[],
+  showcaseStats: PageStat[],
+  model: ResponseModel
+): Insights {
+  const byId = new Map(showcasePages.map((p) => [p.id, p]));
+  const summary = summarizeFit(model.population);
 
-  // --- overall winner ---
-  const sorted = [...stats].sort((a, b) => b.convRate - a.convRate);
-  const overallWinner = sorted[0].pageId;
+  const sortedStats = [...showcaseStats].sort((a, b) => b.convRate - a.convRate);
+  const overallWinner = sortedStats[0]?.pageId ?? showcasePages[0].id;
 
-  // --- angle credit assignment ---
-  // weighted average of page conversion rates, weighted by how much each page
-  // emphasizes the angle. Independent of how the bandit split traffic.
-  const angleScores: AngleScore[] = ANGLES.map((angle) => {
-    let num = 0;
-    let den = 0;
-    for (const s of stats) {
-      const p = byId.get(s.pageId)!;
-      const w = p.features.angleWeights[angle];
-      num += w * s.convRate;
-      den += w;
-    }
-    return { angle, score: den > 0 ? num / den : 0 };
-  }).sort((a, b) => b.score - a.score);
-
-  // --- CTA credit ---
-  const ctaAgg: Record<CTAType, { visits: number; conv: number }> = {
-    demo: { visits: 0, conv: 0 },
-    trial: { visits: 0, conv: 0 },
-    soft: { visits: 0, conv: 0 },
-  };
-  for (const s of stats) {
-    const p = byId.get(s.pageId)!;
-    ctaAgg[p.cta.type].visits += s.visits;
-    ctaAgg[p.cta.type].conv += s.conversions;
-  }
-  const ctaScores = (Object.keys(ctaAgg) as CTAType[])
-    .map((type) => ({
-      type,
-      visits: ctaAgg[type].visits,
-      convRate: ctaAgg[type].visits ? ctaAgg[type].conv / ctaAgg[type].visits : 0,
-    }))
-    .filter((c) => c.visits > 0)
-    .sort((a, b) => b.convRate - a.convRate);
-
-  // --- section dwell credit (hot / cold sections by angle) ---
+  // attention (dwell) from showcase pages, all visitors vs converters
   const dwellAgg: Record<Angle, { convSum: number; convW: number; allSum: number; allW: number }> =
     Object.fromEntries(
       ANGLES.map((a) => [a, { convSum: 0, convW: 0, allSum: 0, allW: 0 }])
     ) as Record<Angle, { convSum: number; convW: number; allSum: number; allW: number }>;
-
-  for (const s of stats) {
-    const p = byId.get(s.pageId)!;
+  for (const s of showcaseStats) {
+    const p = byId.get(s.pageId);
+    if (!p) continue;
     p.sections.forEach((sec, i) => {
       const d = dwellAgg[sec.angle];
       d.convSum += (s.sectionDwellConverters[i] ?? 0) * s.conversions;
@@ -108,10 +118,9 @@ export function computeInsights(pages: PageSpec[], stats: PageStat[]): Insights 
   const hotAngles = [...angleDwell].sort((a, b) => b.lift - a.lift).slice(0, 2);
   const coldAngles = [...angleDwell].sort((a, b) => a.allDwell - b.allDwell).slice(0, 2);
 
-  // --- segment winners (the targeting story) ---
   const segmentWinners: SegmentWinner[] = Object.keys(PERSONA_BY_ID).map((seg) => {
     let best = { pageId: "", convRate: -1, visits: 0 };
-    for (const s of stats) {
+    for (const s of showcaseStats) {
       const sek = s.bySegment[seg];
       if (!sek || sek.visits < 1) continue;
       if (sek.convRate > best.convRate) {
@@ -122,30 +131,23 @@ export function computeInsights(pages: PageSpec[], stats: PageStat[]): Insights 
     return {
       segment: seg,
       segmentName: PERSONA_BY_ID[seg].name,
-      pageId: best.pageId,
+      pageId: best.pageId || "—",
       pageName: page?.name ?? "—",
       convRate: best.convRate < 0 ? 0 : best.convRate,
       visits: best.visits,
-      topAngle: page?.primaryAngle ?? "personalization",
+      topAngle: page?.primaryAngle ?? summary.winningAngle,
     };
   });
-  const winnerPages = new Set(segmentWinners.map((s) => s.pageId));
-  const segmentsDiffer = winnerPages.size > 1;
-
-  void ANGLE_LABEL;
+  const segmentsDiffer = new Set(segmentWinners.map((s) => s.pageId)).size > 1;
 
   return {
+    ...summary,
     overallWinner,
     overallWinnerName: byId.get(overallWinner)?.name ?? overallWinner,
-    angleScores,
-    winningAngle: angleScores[0].angle,
-    secondAngle: angleScores[1].angle,
-    losingAngle: angleScores[angleScores.length - 1].angle,
-    ctaScores,
-    bestCTA: ctaScores[0]?.type ?? "demo",
     hotAngles,
     coldAngles,
     segmentWinners,
     segmentsDiffer,
+    model,
   };
 }

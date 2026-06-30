@@ -1,9 +1,10 @@
-import { deriveAngleWeights } from "./pages";
-import { Insights } from "./insights";
-import { clamp } from "./rng";
+import { blendWeights } from "./design";
+import { FitSummary, Insights, summarizeFit } from "./insights";
+import { Coefficient, featurizeParams, FitResult } from "./regression";
 import {
   Angle,
   ANGLE_LABEL,
+  ANGLES,
   ChangeNote,
   CTA_LABEL,
   CTAType,
@@ -13,10 +14,17 @@ import {
   SectionKind,
 } from "./types";
 
-// A "slot plan" is the data-driven structure of the new page: which angle each
-// section pushes and what kind it is. The LLM (or the fallback) only writes copy
-// into these slots, so the page's feature vector is always exactly the strategy
-// the optimizer derived — never whatever the LLM felt like.
+// The explored ranges (must match lib/design.ts) so the optimizer never
+// extrapolates beyond what the model actually saw.
+const PROOF_HI = 0.85;
+const PROOF_LO = 0.3;
+const SPEC_HI = 0.85;
+const SPEC_LO = 0.3;
+const LEN_SHORT = 5;
+const LEN_LONG = 8;
+
+const CTAS: CTAType[] = ["demo", "trial", "soft"];
+
 export interface Slot {
   kind: SectionKind;
   angle: Angle;
@@ -28,14 +36,17 @@ export interface VariantPlan {
   primaryAngle: Angle;
   secondaryAngle: Angle;
   cta: CTAType;
+  angleWeights: Record<Angle, number>;
+  socialProof: number;
+  specificity: number;
+  lengthTarget: number;
   slots: Slot[];
-  generatedFor?: string;
-  baselineId: string;
+  predictedConv: number; // the fitted model's prediction for this page
   rationale: ChangeNote[];
+  baselineId: string;
   accent: string;
+  generatedFor?: string;
 }
-
-const ctaStrengthOf: Record<CTAType, number> = { demo: 1.0, trial: 0.8, soft: 0.5 };
 
 const accentForAngle: Record<Angle, string> = {
   roi: "emerald",
@@ -45,160 +56,190 @@ const accentForAngle: Record<Angle, string> = {
   speed: "amber",
 };
 
-function pct(x: number): string {
-  return `${(x * 100).toFixed(1)}%`;
+const ctaStrengthOf: Record<CTAType, number> = { demo: 1.0, trial: 0.8, soft: 0.5 };
+
+// The scalar levers are monotonic in the model, so the conversion-maximizing
+// choice within the explored range is simply the endpoint matching each
+// coefficient's sign. These come from DATA, not from a hand-picked constant.
+function chooseScalars(s: FitSummary) {
+  return {
+    socialProof: s.proofCoef.value >= 0 ? PROOF_HI : PROOF_LO,
+    specificity: s.specCoef.value >= 0 ? SPEC_HI : SPEC_LO,
+    lengthTarget: s.lengthCoef.value < 0 ? LEN_SHORT : LEN_LONG,
+  };
 }
 
-// Decide the data-driven structure of the next page from what we learned.
-export function planVariant(
-  insights: Insights,
-  pages: PageSpec[],
-  opts: { id: string; forSegment?: string }
-): VariantPlan {
-  const seeds = pages.filter((p) => p.origin === "seed");
-  const bestSeed =
-    seeds.find((p) => p.id === insights.overallWinner) ??
-    [...seeds].sort(
-      (a, b) =>
-        (insights.angleScores.find((s) => s.angle === b.primaryAngle)?.score ?? 0) -
-        (insights.angleScores.find((s) => s.angle === a.primaryAngle)?.score ?? 0)
-    )[0];
+interface Candidate {
+  primary: Angle;
+  secondary: Angle;
+  cta: CTAType;
+  predicted: number;
+}
 
-  // pick the strongest complementary angle that isn't the primary or the loser
-  const complementOf = (primary: Angle): Angle => {
-    const found = insights.angleScores.find(
-      (a) => a.angle !== primary && a.angle !== insights.losingAngle
-    );
-    return found ? found.angle : insights.secondAngle;
-  };
-
-  let primaryAngle: Angle;
-  let secondaryAngle: Angle;
-  let cta: CTAType;
-  let name: string;
-  let baselineId = bestSeed.id;
-
-  if (opts.forSegment) {
-    const sw = insights.segmentWinners.find((s) => s.segment === opts.forSegment)!;
-    const segPage = pages.find((p) => p.id === sw.pageId)!;
-    // anchor on the angle of the page THIS segment converted on
-    primaryAngle = segPage.primaryAngle;
-    secondaryAngle =
-      segPage.secondaryAngle && segPage.secondaryAngle !== primaryAngle
-        ? segPage.secondaryAngle
-        : complementOf(primaryAngle);
-    cta = segPage.cta.type;
-    name = `Targeted · ${sw.segmentName}`;
-    baselineId = segPage.id;
-  } else {
-    // anchor on the angle of the best overall page (consistent, defensible)
-    primaryAngle = bestSeed.primaryAngle;
-    secondaryAngle = complementOf(primaryAngle);
-    cta = insights.bestCTA;
-    name = "Synthesized Winner";
+// For each primary angle, the best (secondary, CTA) combo under the fitted
+// model, ranked by predicted conversion. One candidate per primary keeps the
+// evolution rounds visibly distinct (different lead angles).
+function candidatesByPrimary(fit: FitResult, s: FitSummary): Candidate[] {
+  const scalars = chooseScalars(s);
+  const out: Candidate[] = [];
+  for (const primary of ANGLES) {
+    let best: Candidate | null = null;
+    for (const secondary of ANGLES) {
+      if (secondary === primary) continue;
+      for (const cta of CTAS) {
+        const x = featurizeParams({
+          angleWeights: blendWeights(primary, secondary),
+          cta,
+          socialProof: scalars.socialProof,
+          specificity: scalars.specificity,
+          length: scalars.lengthTarget,
+        });
+        const predicted = fit.predict(x);
+        if (!best || predicted > best.predicted) best = { primary, secondary, cta, predicted };
+      }
+    }
+    if (best) out.push(best);
   }
+  return out.sort((a, b) => b.predicted - a.predicted);
+}
 
-  // Build the section plan: lead with the winning angle, support with the
-  // complementary angle, voice the proof in the primary angle, end on the CTA.
-  // Proof is carried by the scalar features (socialProof/specificity), NOT by a
-  // research/roi section that would inject an angle the target audience dislikes.
+function buildSlots(primary: Angle, secondary: Angle, lengthTarget: number): Slot[] {
   const slots: Slot[] = [
-    { kind: "hero", angle: primaryAngle },
-    { kind: "solution", angle: primaryAngle },
-    { kind: "how_it_works", angle: secondaryAngle },
-    { kind: "features", angle: primaryAngle },
-    { kind: "social_proof", angle: primaryAngle },
+    { kind: "hero", angle: primary },
+    { kind: "solution", angle: primary },
+    { kind: "how_it_works", angle: secondary },
+    { kind: "social_proof", angle: primary },
+    { kind: "cta", angle: primary },
   ];
-  // a concrete-numbers beat only when the audience actually values it
-  if (primaryAngle === "roi" || primaryAngle === "research") {
-    slots.push({ kind: "metrics", angle: "roi" });
+  if (lengthTarget >= 6) slots.splice(3, 0, { kind: "features", angle: primary });
+  if (lengthTarget >= 7) {
+    slots.splice(4, 0, {
+      kind: primary === "roi" || primary === "research" ? "metrics" : "how_it_works",
+      angle: primary === "roi" || primary === "research" ? "roi" : secondary,
+    });
   }
-  slots.push({ kind: "cta", angle: primaryAngle });
+  return slots;
+}
 
-  const rationale = buildRationale(insights, bestSeed, {
-    primaryAngle,
-    secondaryAngle,
-    cta,
-    nSections: slots.length,
-    forSegment: opts.forSegment,
-  });
+function fmtCoef(value: number, ci: [number, number]): string {
+  const sign = value >= 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)} (95% CI ${ci[0].toFixed(2)}–${ci[1].toFixed(2)})`;
+}
 
-  return {
-    id: opts.id,
-    name,
-    primaryAngle,
-    secondaryAngle,
-    cta,
-    slots,
-    generatedFor: opts.forSegment,
-    baselineId,
-    rationale,
-    accent: accentForAngle[primaryAngle],
-  };
+function sig(c: Coefficient): boolean {
+  return c.ci[0] > 0 || c.ci[1] < 0;
 }
 
 function buildRationale(
-  insights: Insights,
-  bestSeed: PageSpec,
-  v: {
-    primaryAngle: Angle;
-    secondaryAngle: Angle;
-    cta: CTAType;
-    nSections: number;
-    forSegment?: string;
-  }
+  s: FitSummary,
+  pick: Candidate,
+  scalars: { socialProof: number; specificity: number; lengthTarget: number },
+  baseline: PageSpec | undefined,
+  segName?: string
 ): ChangeNote[] {
   const notes: ChangeNote[] = [];
-  const winScore = insights.angleScores.find((s) => s.angle === v.primaryAngle)?.score ?? 0;
-  const loseScore = insights.angleScores.find((s) => s.angle === insights.losingAngle)?.score ?? 0;
+  const angleCoef = s.angleCoefs.find((a) => a.angle === pick.primary)!;
+  const ctaCoef = s.ctaCoefs.find((c) => c.type === pick.cta)!;
+  const isTop = s.angleCoefs[0].angle === pick.primary;
 
-  if (v.forSegment) {
-    const sw = insights.segmentWinners.find((s) => s.segment === v.forSegment)!;
+  if (segName) {
     notes.push({
-      change: `Targeted the ${sw.segmentName} segment specifically`,
-      why: `In the experiment, ${sw.segmentName} converted best on "${sw.pageName}" (${pct(
-        sw.convRate
-      )}). This variant leads with that segment's winning angle instead of the one-size-fits-all message.`,
+      change: `Tuned to the ${segName} segment's own fitted model`,
+      why: `Optimized against the response model fit on ${segName} traffic only — its strongest angle is ${ANGLE_LABEL[s.winningAngle]} (coef ${fmtCoef(s.angleCoefs[0].coef, s.angleCoefs[0].ci)}).`,
     });
   }
 
   notes.push({
-    change: `Led with ${ANGLE_LABEL[v.primaryAngle]} messaging`,
-    why: `Pages emphasizing ${ANGLE_LABEL[v.primaryAngle]} converted at ${pct(
-      winScore
-    )} — the highest of any angle. The previous best page ("${bestSeed.name}") led with ${ANGLE_LABEL[bestSeed.primaryAngle]}.`,
-  });
-
-  if (v.cta !== bestSeed.cta.type) {
-    const ctaScore = insights.ctaScores.find((c) => c.type === v.cta);
-    notes.push({
-      change: `Switched the call-to-action to "${CTA_LABEL[v.cta]}"`,
-      why: `"${CTA_LABEL[v.cta]}" CTAs converted at ${pct(
-        ctaScore?.convRate ?? 0
-      )} across the test, beating the "${CTA_LABEL[bestSeed.cta.type]}" CTA.`,
-    });
-  }
-
-  notes.push({
-    change: `Dropped the ${ANGLE_LABEL[insights.losingAngle]} section`,
-    why: `${ANGLE_LABEL[insights.losingAngle]} was the weakest angle (${pct(
-      loseScore
-    )} weighted conversion) and visitors spent the least time on those sections — it was costing length without earning clicks.`,
+    change: `Led with ${ANGLE_LABEL[pick.primary]} messaging`,
+    why: `In the fitted model, ${ANGLE_LABEL[pick.primary]} has a coefficient of ${fmtCoef(angleCoef.coef, angleCoef.ci)}${
+      isTop ? " — the highest-converting angle" : ""
+    }. The previous best page ("${baseline?.name ?? "best original"}") led with ${
+      baseline ? ANGLE_LABEL[baseline.primaryAngle] : "a single angle"
+    }.`,
   });
 
   notes.push({
-    change: `Blended in a ${ANGLE_LABEL[v.secondaryAngle]} beat`,
-    why: `No single seed page combined ${ANGLE_LABEL[v.primaryAngle]} with ${ANGLE_LABEL[
-      v.secondaryAngle
-    ]}; both scored well, so the variant recombines them rather than betting on one.`,
+    change: `Chose the "${CTA_LABEL[pick.cta]}" call-to-action`,
+    why:
+      pick.cta === "soft"
+        ? `Soft CTA is the baseline; the model found the other CTAs no better for this audience.`
+        : `"${CTA_LABEL[pick.cta]}" carries a coefficient of ${fmtCoef(ctaCoef.coef, ctaCoef.ci)} versus the soft-CTA baseline — measured independently of the message angle.`,
+  });
+
+  const proofMaxed = scalars.socialProof >= PROOF_HI;
+  notes.push({
+    change: `${proofMaxed ? "Maximized" : "Minimized"} social proof and ${
+      scalars.specificity >= SPEC_HI ? "kept concrete numbers high" : "kept copy light on numbers"
+    }`,
+    why: `Social-proof coefficient ${fmtCoef(s.proofCoef.value, s.proofCoef.ci)}${sig(s.proofCoef) ? " (significant)" : " (directional)"}, specificity ${fmtCoef(
+      s.specCoef.value,
+      s.specCoef.ci
+    )}. The optimizer set each lever to the conversion-maximizing end of the tested range — not a hand-picked value.`,
+  });
+
+  notes.push({
+    change: `Targeted a ${scalars.lengthTarget <= LEN_SHORT ? "shorter" : "longer"} page`,
+    why: `Length coefficient ${fmtCoef(s.lengthCoef.value, s.lengthCoef.ci)} — ${
+      s.lengthCoef.value < 0 ? "longer pages convert worse, so the page is trimmed" : "more sections helped, so the page is fuller"
+    }.`,
+  });
+
+  notes.push({
+    change: `Dropped the ${ANGLE_LABEL[s.losingAngle]} angle`,
+    why: `It was the weakest angle in the fit (coef ${fmtCoef(
+      s.angleCoefs[s.angleCoefs.length - 1].coef,
+      s.angleCoefs[s.angleCoefs.length - 1].ci
+    )}).`,
   });
 
   return notes;
 }
 
+// Optimize a new page as the argmax of the fitted response model. `rank` selects
+// the rank-th best primary-angle candidate (used by the evolution loop to try
+// successively weaker hypotheses).
+export function optimizeVariant(
+  insights: Insights,
+  showcasePages: PageSpec[],
+  opts: { id: string; forSegment?: string; rank?: number; segName?: string }
+): VariantPlan {
+  const fit = opts.forSegment ? insights.model.bySegment[opts.forSegment] : insights.model.population;
+  const s = summarizeFit(fit);
+  const scalars = chooseScalars(s);
+  const candidates = candidatesByPrimary(fit, s);
+  const pick = candidates[Math.min(opts.rank ?? 0, candidates.length - 1)];
+
+  const baseline = showcasePages.find((p) => p.id === insights.overallWinner) ?? showcasePages[0];
+  const rationale = buildRationale(s, pick, scalars, baseline, opts.segName);
+
+  const rank = opts.rank ?? 0;
+  const name = opts.forSegment
+    ? `Targeted · ${opts.segName ?? opts.forSegment}`
+    : rank === 0
+      ? "Synthesized Winner"
+      : `Candidate ${rank + 1} (${ANGLE_LABEL[pick.primary]})`;
+
+  return {
+    id: opts.id,
+    name,
+    primaryAngle: pick.primary,
+    secondaryAngle: pick.secondary,
+    cta: pick.cta,
+    angleWeights: blendWeights(pick.primary, pick.secondary),
+    socialProof: scalars.socialProof,
+    specificity: scalars.specificity,
+    lengthTarget: scalars.lengthTarget,
+    slots: buildSlots(pick.primary, pick.secondary, scalars.lengthTarget),
+    predictedConv: pick.predicted,
+    rationale,
+    baselineId: baseline.id,
+    accent: accentForAngle[pick.primary],
+    generatedFor: opts.forSegment,
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Fallback copy library — used when no LLM key is present, or as the safety net
-// if the LLM call fails. Real, on-brand Scholé copy keyed by angle.
+// Copy library (fallback, or as the safety net if the LLM fails) + realization.
 // ---------------------------------------------------------------------------
 
 const HERO_COPY: Record<Angle, { heading: string; body: string }> = {
@@ -248,13 +289,13 @@ const SECTION_COPY: Record<Angle, { heading: string; body: string }> = {
 };
 
 const PROOF_COPY = {
-  heading: "Trusted where it counts",
-  body: "Decathlon reshaped its AI learning strategy on Scholé; teams from Bank of America, Oracle, NASA, and Harvard's Data Science Initiative learn here. #1 at the Learning Engineering Tools Competition.",
+  heading: "Trusted by teams putting AI to work",
+  body: "Used across enterprise pilots to lift adoption and prove impact (illustrative proof points for this demo).",
 };
 
 const METRICS_COPY = {
   heading: "What teams see",
-  body: "3.2 hrs/week saved per active learner · 78% 30-day adoption · 11% monthly lift in measured mastery.",
+  body: "3.2 hrs/week saved per active learner · 78% 30-day adoption · 11% monthly lift in measured mastery (illustrative).",
 };
 
 function copyForSlot(slot: Slot): { heading: string; body: string } {
@@ -264,7 +305,6 @@ function copyForSlot(slot: Slot): { heading: string; body: string } {
   return SECTION_COPY[slot.angle];
 }
 
-// Materialize a plan into a full PageSpec using fallback copy.
 export function realizeVariant(plan: VariantPlan): PageSpec {
   const sections: Section[] = plan.slots.map((slot) => {
     const c = copyForSlot(slot);
@@ -273,7 +313,6 @@ export function realizeVariant(plan: VariantPlan): PageSpec {
   return assembleSpec(plan, sections, HERO_COPY[plan.primaryAngle].heading, subheadFor(plan));
 }
 
-// Materialize a plan using LLM-authored copy overlaid on the fixed slot plan.
 export function realizeVariantWithCopy(
   plan: VariantPlan,
   copy: { headline: string; subhead: string; sections: { heading: string; body: string }[] }
@@ -296,9 +335,12 @@ export function realizeVariantWithCopy(
 }
 
 function subheadFor(plan: VariantPlan): string {
-  return `${ANGLE_LABEL[plan.primaryAngle]} meets ${ANGLE_LABEL[plan.secondaryAngle]} — recombined from what converted best, with a "${CTA_LABEL[plan.cta]}" call to action.`;
+  return `${ANGLE_LABEL[plan.primaryAngle]} meets ${ANGLE_LABEL[plan.secondaryAngle]} — features chosen by the fitted response model, with a "${CTA_LABEL[plan.cta]}" call to action.`;
 }
 
+// The variant's feature vector is exactly what the optimizer scored — angle
+// blend, model-chosen scalars, actual length — so the simulated result and the
+// model's prediction stay consistent.
 function assembleSpec(
   plan: VariantPlan,
   sections: Section[],
@@ -306,17 +348,12 @@ function assembleSpec(
   subhead: string
 ): PageSpec {
   const features: PageFeatures = {
-    angleWeights: deriveAngleWeights(sections, plan.primaryAngle),
+    angleWeights: plan.angleWeights,
     ctaType: plan.cta,
     ctaStrength: ctaStrengthOf[plan.cta],
-    // The synthesized winner keeps the consensus angle but maxes the proof and
-    // concreteness that the data showed convert — a combination no single seed
-    // page had. These scalars help the proof-seeking segments and are roughly
-    // neutral for the rest, so the page strictly improves on the field.
-    socialProof: clamp(0.85, 0, 1),
-    specificity:
-      plan.primaryAngle === "roi" || plan.primaryAngle === "research" ? 0.9 : 0.75,
-    visualDensity: 0.7,
+    socialProof: plan.socialProof,
+    specificity: plan.specificity,
+    visualDensity: 0.65,
     length: sections.length,
   };
   return {

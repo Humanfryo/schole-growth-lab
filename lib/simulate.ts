@@ -1,6 +1,6 @@
 import { DGP, LEN_REF } from "./constants";
 import { Persona, PERSONAS } from "./personas";
-import { clamp, RNG, sigmoid, wilson } from "./rng";
+import { clamp, hashStringToSeed, RNG, sigmoid, wilson } from "./rng";
 import { PageSpec, PageStat, Visit } from "./types";
 
 // True conversion propensity (logit) of a persona on a page. This is the latent
@@ -97,9 +97,11 @@ export function sampleBehavior(
   pages: PageSpec[],
   opts: { seed: number; perPage: number }
 ): { visits: Visit[]; stats: PageStat[] } {
-  const rng = new RNG(opts.seed);
   const visits: Visit[] = [];
   for (const page of pages) {
+    // each page gets its own RNG stream keyed by its id, so its simulated
+    // behavior is identical regardless of what other pages are in the field
+    const rng = new RNG(opts.seed ^ hashStringToSeed(page.id));
     for (let i = 0; i < opts.perPage; i++) {
       const persona = samplePersona(rng);
       visits.push(simulateVisit(rng, page, persona));

@@ -69,6 +69,18 @@ export class RNG {
   }
 }
 
+// Stable string -> 32-bit seed (FNV-1a). Lets each page own an independent RNG
+// stream keyed by its id, so adding/removing/reordering a page never perturbs
+// the others' simulated behavior.
+export function hashStringToSeed(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
 export const sigmoid = (x: number): number => 1 / (1 + Math.exp(-x));
 
 export const clamp = (x: number, lo: number, hi: number): number =>

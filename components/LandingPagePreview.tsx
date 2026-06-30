@@ -7,19 +7,28 @@ function SectionBlock({ section, accentHex }: { section: Section; accentHex: str
   const c = ANGLE_COLORS[section.angle];
 
   if (section.kind === "metrics") {
-    const stats = section.body.split("·").map((s) => s.trim());
-    return (
-      <div className="border-t border-zinc-100 px-8 py-10">
-        <h3 className="mb-5 text-lg font-semibold text-zinc-900">{section.heading}</h3>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {stats.map((s, i) => (
-            <div key={i} className={`rounded-xl ${c.bgSoft} px-4 py-5 text-center`}>
-              <span className={`text-sm font-semibold ${c.text}`}>{s}</span>
-            </div>
-          ))}
+    const stats = (section.bullets && section.bullets.length
+      ? section.bullets
+      : section.body.split("·")
+    )
+      .map((s) => s.trim())
+      .filter(Boolean);
+    // only render the stat-tile layout when there are genuinely multiple stats;
+    // otherwise fall through to the normal paragraph block below
+    if (stats.length >= 2) {
+      return (
+        <div className="border-t border-zinc-100 px-8 py-10">
+          <h3 className="mb-5 text-lg font-semibold text-zinc-900">{section.heading}</h3>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {stats.map((s, i) => (
+              <div key={i} className={`rounded-xl ${c.bgSoft} px-4 py-5 text-center`}>
+                <span className={`text-sm font-semibold ${c.text}`}>{s}</span>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
-    );
+      );
+    }
   }
 
   if (section.kind === "social_proof") {
@@ -37,6 +46,7 @@ function SectionBlock({ section, accentHex }: { section: Section; accentHex: str
             </span>
           ))}
         </div>
+        <p className="mt-2 text-[10px] text-zinc-400">Illustrative proof points for this demo.</p>
       </div>
     );
   }

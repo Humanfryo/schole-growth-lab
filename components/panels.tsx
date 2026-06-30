@@ -1,3 +1,4 @@
+import { EvolutionResult } from "@/lib/lab";
 import { Insights } from "@/lib/insights";
 import { ANGLE_COLORS } from "@/lib/colors";
 import { PERSONAS } from "@/lib/personas";
@@ -10,16 +11,20 @@ function hexToRgba(hex: string, a: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Leaderboard — conversion rate with Wilson confidence bands.
+// Leaderboard — conversion rate with Wilson bands + significance state.
 // ---------------------------------------------------------------------------
 export function Leaderboard({
   pages,
   stats,
   bestId,
+  significant,
+  pBest,
 }: {
   pages: PageSpec[];
   stats: PageStat[];
   bestId: string;
+  significant?: boolean;
+  pBest?: Record<string, number>;
 }) {
   const byId = new Map(pages.map((p) => [p.id, p]));
   const sorted = [...stats].sort((a, b) => b.convRate - a.convRate);
@@ -28,9 +33,11 @@ export function Leaderboard({
   return (
     <div className="space-y-2.5">
       {sorted.map((s, i) => {
-        const p = byId.get(s.pageId)!;
+        const p = byId.get(s.pageId);
+        if (!p) return null;
         const c = ANGLE_COLORS[p.primaryAngle];
         const isBest = s.pageId === bestId;
+        const winProb = pBest?.[s.pageId];
         return (
           <div
             key={s.pageId}
@@ -44,24 +51,25 @@ export function Leaderboard({
                 {s.pageId}
               </span>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-sm font-semibold text-zinc-900">{p.name}</span>
-                  {p.origin === "generated" && (
-                    <Pill className="bg-zinc-900 text-white">NEW</Pill>
+                  {p.origin === "generated" && <Pill className="bg-zinc-900 text-white">NEW</Pill>}
+                  {isBest && significant && <Pill className={`${c.bg} text-white`}>WINNER ✓ sig</Pill>}
+                  {isBest && significant === false && (
+                    <Pill className="bg-amber-100 text-amber-700">leading · not yet sig</Pill>
                   )}
-                  {isBest && <Pill className={`${c.bg} text-white`}>WINNER</Pill>}
+                  {isBest && significant === undefined && (
+                    <Pill className={`${c.bg} text-white`}>WINNER</Pill>
+                  )}
                 </div>
               </div>
               <div className="text-right">
-                <div className="text-base font-bold tabular-nums text-zinc-900">
-                  {pctText(s.convRate)}
-                </div>
+                <div className="text-base font-bold tabular-nums text-zinc-900">{pctText(s.convRate)}</div>
                 <div className="text-[10px] tabular-nums text-zinc-400">
                   95% CI {pctText(s.ci[0])}–{pctText(s.ci[1])}
                 </div>
               </div>
             </div>
-            {/* conversion bar with CI whisker */}
             <div className="mt-2.5 ml-[3.4rem] mr-1">
               <div className="relative h-2 rounded-full bg-zinc-100">
                 <div
@@ -78,11 +86,13 @@ export function Leaderboard({
                 />
               </div>
             </div>
-            <div className="mt-2 ml-[3.4rem] flex gap-4 text-[11px] text-zinc-500">
+            <div className="mt-2 ml-[3.4rem] flex flex-wrap gap-4 text-[11px] text-zinc-500">
               <span>scroll {pctText(s.avgScrollDepth, 0)}</span>
               <span>time {s.avgTimeOnPage.toFixed(0)}s</span>
               <span>bounce {pctText(s.bounceRate, 0)}</span>
-              <span>{s.visits.toLocaleString()} visits</span>
+              {winProb !== undefined && (
+                <span className="font-medium text-zinc-600">P(best) {pctText(winProb, 0)}</span>
+              )}
             </div>
           </div>
         );
@@ -92,7 +102,96 @@ export function Leaderboard({
 }
 
 // ---------------------------------------------------------------------------
-// Behavior heatmap — per-section dwell time, the raw "where attention goes".
+// Coefficient plot — the fitted response model's effect sizes with 95% CIs.
+// This is the honest "what converts, and how confident."
+// ---------------------------------------------------------------------------
+interface CoefRow {
+  label: string;
+  coef: number;
+  ci: [number, number];
+  hex: string;
+}
+
+function CoefficientPlot({ title, rows, note }: { title: string; rows: CoefRow[]; note?: string }) {
+  const scale = Math.max(0.1, ...rows.flatMap((r) => [Math.abs(r.ci[0]), Math.abs(r.ci[1]), Math.abs(r.coef)]));
+  const pos = (x: number) => 50 + (x / scale) * 48; // % position, 50% = zero
+  return (
+    <div>
+      <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">{title}</h4>
+      <div className="space-y-2.5">
+        {rows.map((r) => {
+          const zero = pos(0);
+          const cLo = pos(r.ci[0]);
+          const cHi = pos(r.ci[1]);
+          const pt = pos(r.coef);
+          const sig = r.ci[0] > 0 || r.ci[1] < 0;
+          return (
+            <div key={r.label} className="flex items-center gap-3">
+              <span className="w-28 shrink-0 truncate text-[12px] font-medium text-zinc-700">{r.label}</span>
+              <div className="relative h-5 flex-1">
+                {/* zero line */}
+                <div className="absolute inset-y-0 w-px bg-zinc-300" style={{ left: `${zero}%` }} />
+                {/* CI whisker */}
+                <div
+                  className="absolute top-1/2 h-0.5 -translate-y-1/2 rounded-full"
+                  style={{ left: `${Math.min(cLo, cHi)}%`, width: `${Math.abs(cHi - cLo)}%`, backgroundColor: hexToRgba(r.hex, 0.4) }}
+                />
+                {/* point estimate */}
+                <div
+                  className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white"
+                  style={{ left: `${pt}%`, backgroundColor: r.hex }}
+                  title={`${r.coef.toFixed(2)} [${r.ci[0].toFixed(2)}, ${r.ci[1].toFixed(2)}]`}
+                />
+              </div>
+              <span className={`w-16 shrink-0 text-right text-[11px] tabular-nums ${sig ? "font-semibold text-zinc-800" : "text-zinc-400"}`}>
+                {r.coef >= 0 ? "+" : ""}
+                {r.coef.toFixed(2)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {note && <p className="mt-3 text-[11px] text-zinc-400">{note}</p>}
+    </div>
+  );
+}
+
+export function InsightsPanel({ insights }: { insights: Insights }) {
+  const angleRows: CoefRow[] = insights.angleCoefs.map((a) => ({
+    label: ANGLE_LABEL[a.angle],
+    coef: a.coef,
+    ci: a.ci,
+    hex: ANGLE_COLORS[a.angle].hex,
+  }));
+  const leverRows: CoefRow[] = [
+    { label: `CTA: ${CTA_LABEL.demo}`, coef: insights.ctaCoefs.find((c) => c.type === "demo")!.coef, ci: insights.ctaCoefs.find((c) => c.type === "demo")!.ci, hex: "#3f3f46" },
+    { label: `CTA: ${CTA_LABEL.trial}`, coef: insights.ctaCoefs.find((c) => c.type === "trial")!.coef, ci: insights.ctaCoefs.find((c) => c.type === "trial")!.ci, hex: "#3f3f46" },
+    { label: "Social proof", coef: insights.proofCoef.value, ci: insights.proofCoef.ci, hex: "#0f766e" },
+    { label: "Specificity (numbers)", coef: insights.specCoef.value, ci: insights.specCoef.ci, hex: "#0f766e" },
+    { label: "Page length", coef: insights.lengthCoef.value, ci: insights.lengthCoef.ci, hex: "#b45309" },
+  ];
+  return (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <Card>
+        <CoefficientPlot
+          title="Message angle — fitted effect on conversion (log-odds)"
+          rows={angleRows}
+          note="Coefficients from a logistic model fit on the exploration design (CTA baseline = soft). Dots are point estimates; bars are 95% CIs. Bold = significant."
+        />
+      </Card>
+      <Card>
+        <CoefficientPlot
+          title="Page levers — fitted effect (vs soft-CTA baseline)"
+          rows={leverRows}
+          note="CTA effect is identified independently of angle because the design varies them separately. Length is normalized; negative = longer pages convert worse."
+        />
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Behavior heatmap — per-section dwell.
 // ---------------------------------------------------------------------------
 export function BehaviorHeatmap({ pages, stats }: { pages: PageSpec[]; stats: PageStat[] }) {
   const byId = new Map(stats.map((s) => [s.pageId, s]));
@@ -115,12 +214,10 @@ export function BehaviorHeatmap({ pages, stats }: { pages: PageSpec[]; stats: Pa
                   <div
                     key={i}
                     title={`${sec.heading} — ${ANGLE_LABEL[sec.angle]} · ${d.toFixed(1)}s avg`}
-                    className="group relative h-9 flex-1 rounded-md border border-white"
-                    style={{ backgroundColor: hexToRgba(c.hex, 0.18 + 0.82 * (d / maxDwell)) }}
+                    className="flex h-9 flex-1 items-center justify-center rounded-md border border-white text-[10px] font-semibold text-white/80"
+                    style={{ backgroundColor: hexToRgba(c.hex, 0.25 + 0.75 * (d / maxDwell)) }}
                   >
-                    <span className="absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-white/0 group-hover:text-white">
-                      {d.toFixed(0)}s
-                    </span>
+                    {d.toFixed(0)}s
                   </div>
                 );
               })}
@@ -128,16 +225,13 @@ export function BehaviorHeatmap({ pages, stats }: { pages: PageSpec[]; stats: Pa
           </div>
         );
       })}
-      <p className="pt-1 text-[11px] text-zinc-400">
-        Each cell is a section; darker = more average dwell time. Hover for detail.
-      </p>
+      <p className="pt-1 text-[11px] text-zinc-400">Average dwell per section; darker = more attention.</p>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Segment × page conversion matrix — the targeting money-shot. Different
-// audiences light up different pages.
+// Segment × page conversion matrix.
 // ---------------------------------------------------------------------------
 export function SegmentMatrix({ pages, stats }: { pages: PageSpec[]; stats: PageStat[] }) {
   const statById = new Map(stats.map((s) => [s.pageId, s]));
@@ -146,9 +240,7 @@ export function SegmentMatrix({ pages, stats }: { pages: PageSpec[]; stats: Page
       <table className="w-full border-separate border-spacing-1">
         <thead>
           <tr>
-            <th className="px-2 py-1 text-left text-[11px] font-semibold text-zinc-400">
-              Segment ╲ Page
-            </th>
+            <th className="px-2 py-1 text-left text-[11px] font-semibold text-zinc-400">Segment ╲ Page</th>
             {pages.map((p) => (
               <th key={p.id} className="px-1 py-1 text-center">
                 <span className="mx-auto flex h-6 w-6 items-center justify-center rounded-md bg-zinc-900 text-[11px] font-bold text-white">
@@ -160,17 +252,13 @@ export function SegmentMatrix({ pages, stats }: { pages: PageSpec[]; stats: Page
         </thead>
         <tbody>
           {PERSONAS.map((persona) => {
-            const rowVals = pages.map(
-              (p) => statById.get(p.id)?.bySegment[persona.id]?.convRate ?? 0
-            );
+            const rowVals = pages.map((p) => statById.get(p.id)?.bySegment[persona.id]?.convRate ?? 0);
             const rowMax = Math.max(...rowVals, 0.001);
             return (
               <tr key={persona.id}>
                 <td className="px-2 py-1 text-left">
                   <div className="text-[13px] font-semibold text-zinc-800">{persona.name}</div>
-                  <div className="text-[10px] text-zinc-400">
-                    {pctText(persona.share, 0)} of traffic
-                  </div>
+                  <div className="text-[10px] text-zinc-400">{pctText(persona.share, 0)} of traffic</div>
                 </td>
                 {pages.map((p, i) => {
                   const v = rowVals[i];
@@ -182,9 +270,7 @@ export function SegmentMatrix({ pages, stats }: { pages: PageSpec[]; stats: Page
                         className={`flex h-12 items-center justify-center rounded-md text-[12px] font-bold ${
                           isMax ? "text-white ring-2 ring-zinc-900" : "text-zinc-700"
                         }`}
-                        style={{
-                          backgroundColor: hexToRgba(c.hex, 0.12 + 0.88 * (v / rowMax)),
-                        }}
+                        style={{ backgroundColor: hexToRgba(c.hex, 0.12 + 0.88 * (v / rowMax)) }}
                       >
                         {pctText(v, 0)}
                       </div>
@@ -201,84 +287,63 @@ export function SegmentMatrix({ pages, stats }: { pages: PageSpec[]; stats: Page
 }
 
 // ---------------------------------------------------------------------------
-// Insights panel — what the optimizer learned: angle credit, CTA, hot/cold.
+// Evolution panel — frontier across rounds, with accept/reject.
 // ---------------------------------------------------------------------------
-function RankBars({
-  title,
-  items,
-}: {
-  title: string;
-  items: { label: string; value: number; hex: string }[];
-}) {
-  const max = Math.max(...items.map((i) => i.value), 0.001);
+export function EvolutionPanel({ evolution }: { evolution: EvolutionResult }) {
+  const maxRate = Math.max(
+    ...evolution.rounds.flatMap((r) => [r.observedRate, r.incumbentRate, r.frontier]),
+    0.01
+  );
   return (
-    <div>
-      <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">{title}</h4>
-      <div className="space-y-2">
-        {items.map((it) => (
-          <div key={it.label} className="flex items-center gap-3">
-            <span className="w-32 shrink-0 truncate text-[13px] font-medium text-zinc-700">
-              {it.label}
-            </span>
-            <div className="relative h-5 flex-1 rounded-md bg-zinc-100">
-              <div
-                className="flex h-5 items-center justify-end rounded-md px-2"
-                style={{
-                  width: `${Math.max(8, (it.value / max) * 100)}%`,
-                  backgroundColor: it.hex,
-                }}
-              >
-                <span className="text-[10px] font-bold text-white">{pctText(it.value)}</span>
-              </div>
+    <div className="space-y-3">
+      {evolution.rounds.map((r) => {
+        const c = ANGLE_COLORS[r.variant.primaryAngle];
+        return (
+          <div key={r.round} className="rounded-xl border border-zinc-200 bg-white p-3.5">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="flex h-6 w-6 items-center justify-center rounded-md bg-zinc-900 text-[11px] font-bold text-white">
+                {r.round}
+              </span>
+              <span className="text-[13px] font-semibold text-zinc-800">
+                Candidate: lead with {ANGLE_LABEL[r.variant.primaryAngle]}
+              </span>
+              {r.accepted ? (
+                <Pill className="bg-emerald-600 text-white">ACCEPTED ✓</Pill>
+              ) : (
+                <Pill className="bg-zinc-200 text-zinc-600">rejected — didn&apos;t beat incumbent</Pill>
+              )}
+              <span className="ml-auto text-[11px] text-zinc-400">
+                predicted {pctText(r.predictedConv)}
+              </span>
+            </div>
+            <div className="ml-8 space-y-1.5">
+              <Bar label="this candidate" value={r.observedRate} max={maxRate} hex={c.hex} />
+              <Bar label="incumbent best" value={r.incumbentRate} max={maxRate} hex="#a1a1aa" />
             </div>
           </div>
-        ))}
-      </div>
+        );
+      })}
+      <p className="text-[11px] text-zinc-400">
+        Each round optimizes the next-best hypothesis against the fitted model and tests it live. Only
+        a variant that beats the incumbent is kept — the frontier rises, then plateaus as the design
+        space is exhausted.
+      </p>
     </div>
   );
 }
 
-export function InsightsPanel({ insights }: { insights: Insights }) {
+function Bar({ label, value, max, hex }: { label: string; value: number; max: number; hex: string }) {
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-      <Card>
-        <RankBars
-          title="Which message angle converts"
-          items={insights.angleScores.map((a) => ({
-            label: ANGLE_LABEL[a.angle],
-            value: a.score,
-            hex: ANGLE_COLORS[a.angle].hex,
-          }))}
-        />
-      </Card>
-      <Card>
-        <RankBars
-          title="Which call-to-action converts"
-          items={insights.ctaScores.map((c) => ({
-            label: CTA_LABEL[c.type],
-            value: c.convRate,
-            hex: "#3f3f46",
-          }))}
-        />
-        <div className="mt-5 grid grid-cols-2 gap-3 border-t border-zinc-100 pt-4">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">
-              Hot sections
-            </div>
-            <div className="mt-1 text-[13px] text-zinc-700">
-              {insights.hotAngles.map((a) => ANGLE_LABEL[a.angle]).join(", ")}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-              Ignored sections
-            </div>
-            <div className="mt-1 text-[13px] text-zinc-700">
-              {insights.coldAngles.map((a) => ANGLE_LABEL[a.angle]).join(", ")}
-            </div>
-          </div>
+    <div className="flex items-center gap-2">
+      <span className="w-28 shrink-0 text-[11px] text-zinc-500">{label}</span>
+      <div className="relative h-4 flex-1 rounded bg-zinc-100">
+        <div
+          className="flex h-4 items-center justify-end rounded px-1.5"
+          style={{ width: `${Math.max(6, (value / max) * 100)}%`, backgroundColor: hex }}
+        >
+          <span className="text-[10px] font-bold text-white">{pctText(value)}</span>
         </div>
-      </Card>
+      </div>
     </div>
   );
 }

@@ -1,9 +1,9 @@
 const STEPS = [
-  { n: "1", label: "5 landing pages", sub: "distinct GTM angles" },
-  { n: "2", label: "Simulate visitors", sub: "buyer personas" },
-  { n: "3", label: "Bandit optimizes", sub: "Thompson sampling" },
-  { n: "4", label: "Learn patterns", sub: "angles · CTAs · segments" },
-  { n: "5", label: "LLM generates", sub: "a better variant" },
+  { n: "1", label: "Explore", sub: "60-point design grid" },
+  { n: "2", label: "Fit a response model", sub: "logistic, with CIs" },
+  { n: "3", label: "Optimize a new page", sub: "argmax of the fit" },
+  { n: "4", label: "Validate online", sub: "Thompson bandit" },
+  { n: "5", label: "Iterate", sub: "until it plateaus" },
 ];
 
 export function LoopDiagram() {
