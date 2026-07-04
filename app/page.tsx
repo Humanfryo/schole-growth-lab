@@ -157,6 +157,14 @@ export default function Home() {
           >
             See the 5 contenders
           </a>
+          <a
+            href="/technical-writeup.pdf"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-xl border border-zinc-200 bg-white px-6 py-3.5 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+          >
+            Technical write-up (PDF) ↗
+          </a>
         </div>
 
         <div className="mt-10 grid grid-cols-2 gap-6 sm:grid-cols-4">
