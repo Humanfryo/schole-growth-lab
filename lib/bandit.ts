@@ -1,3 +1,4 @@
+import { Persona } from "./personas";
 import { hashStringToSeed, RNG } from "./rng";
 import { aggregate, samplePersona, simulateVisit } from "./simulate";
 import { PageSpec, PageStat, Visit } from "./types";
@@ -32,7 +33,8 @@ export interface ExperimentResult {
   cumRegret: number;
   bestPageId: string;
   pBest: Record<string, number>; // posterior P(arm is the best)
-  winnerSignificant: boolean; // max pBest >= 0.95
+  winnerSignificant: boolean; // max pBest >= pBestThreshold (default 0.95)
+  pBestThreshold: number; // the significance gate this run was judged against
 }
 
 // Thompson-sampling experiment. Allocation decisions use one RNG stream; each
@@ -43,7 +45,12 @@ export interface ExperimentResult {
 export function runExperiment(
   pages: PageSpec[],
   config: ExperimentConfig,
-  opts: { trueRates?: Record<string, number> } = {}
+  opts: {
+    trueRates?: Record<string, number>;
+    personas?: Persona[]; // override traffic mixture (Lab Controls)
+    pBestThreshold?: number; // significance gate, default 0.95
+    mcSamples?: number; // Monte-Carlo samples for P(best), default 3000
+  } = {}
 ): ExperimentResult {
   const rngAlloc = new RNG(config.seed);
   const pageRng = new Map<string, RNG>(
@@ -89,7 +96,7 @@ export function runExperiment(
 
       const page = pageById.get(bestId)!;
       const rng = pageRng.get(bestId)!;
-      const persona = samplePersona(rng);
+      const persona = samplePersona(rng, opts.personas);
       const visit = simulateVisit(rng, page, persona);
       visits.push(visit);
 
@@ -137,8 +144,9 @@ export function runExperiment(
   );
 
   // posterior P(arm is best) by Monte Carlo over the Beta posteriors
-  const pBest = estimatePBest(rngAlloc, ids, alpha, beta, 3000);
-  const winnerSignificant = Math.max(...ids.map((id) => pBest[id])) >= 0.95;
+  const pBestThreshold = opts.pBestThreshold ?? 0.95;
+  const pBest = estimatePBest(rngAlloc, ids, alpha, beta, opts.mcSamples ?? 3000);
+  const winnerSignificant = Math.max(...ids.map((id) => pBest[id])) >= pBestThreshold;
 
   return {
     config,
@@ -155,6 +163,7 @@ export function runExperiment(
     bestPageId,
     pBest,
     winnerSignificant,
+    pBestThreshold,
   };
 }
 

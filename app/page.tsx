@@ -27,6 +27,12 @@ import {
   SegmentMatrix,
 } from "@/components/panels";
 import { Card, Pill, SectionLabel, Stat } from "@/components/ui";
+import {
+  LabControls,
+  LAB_PANEL_DEFAULTS,
+  LabPanelState,
+  toLabOptions,
+} from "@/components/lab-controls";
 import { VariantMeta, VariantReveal } from "@/components/variant-reveal";
 
 function pct(x: number, d = 1) {
@@ -43,6 +49,11 @@ export default function Home() {
   const [evolution, setEvolution] = useState<EvolutionResult | null>(null);
   const [targeted, setTargeted] = useState<{ pool: PageSpec[]; stats: PageStat[] } | null>(null);
   const [loadingGen, setLoadingGen] = useState(false);
+  const [panel, setPanel] = useState<LabPanelState>(LAB_PANEL_DEFAULTS);
+  const [controlsOpen, setControlsOpen] = useState(false);
+
+  // undefined at defaults, so the canonical run stays the no-options code path
+  const labOptions = useMemo(() => toLabOptions(panel), [panel]);
 
   // auto-run phase 1 on load so a skimming reviewer sees a full dashboard
   useEffect(() => {
@@ -51,6 +62,11 @@ export default function Home() {
   }, []);
 
   function rerun() {
+    setLab(runLab(SEED_PAGES, labOptions));
+  }
+
+  function resetControls() {
+    setPanel(LAB_PANEL_DEFAULTS);
     setLab(runLab(SEED_PAGES));
   }
 
@@ -91,15 +107,15 @@ export default function Home() {
 
     setVariant(v);
     setVariantMeta(meta);
-    setVariantEval(evaluateVariant(SEED_PAGES, v));
-    setMultiSeed(multiSeedLift(SEED_PAGES, lab.insights, 40));
+    setVariantEval(evaluateVariant(SEED_PAGES, v, undefined, labOptions));
+    setMultiSeed(multiSeedLift(SEED_PAGES, lab.insights, 40, labOptions));
     setLoadingGen(false);
     setTimeout(() => document.getElementById("generate")?.scrollIntoView({ behavior: "smooth" }), 60);
   }
 
   function evolve() {
     if (!lab) return;
-    setEvolution(runEvolution(SEED_PAGES, lab.insights, 4));
+    setEvolution(runEvolution(SEED_PAGES, lab.insights, 4, labOptions));
     setTimeout(() => document.getElementById("evolution")?.scrollIntoView({ behavior: "smooth" }), 60);
   }
 
@@ -109,7 +125,7 @@ export default function Home() {
       (p) => planAndRealize(lab.insights, SEED_PAGES, { id: `T-${p.id}`, forSegment: p.id, segName: p.name }).variant
     );
     const pool = [variant, ...tvs];
-    const { stats } = evaluateField(pool, 321);
+    const { stats } = evaluateField(pool, 321, undefined, labOptions?.personas);
     setTargeted({ pool, stats });
     setTimeout(() => document.getElementById("targeted")?.scrollIntoView({ behavior: "smooth" }), 60);
   }
@@ -165,7 +181,22 @@ export default function Home() {
           >
             Technical write-up (PDF) ↗
           </a>
+          <button
+            onClick={() => setControlsOpen((o) => !o)}
+            className="rounded-xl border border-violet-200 bg-violet-50 px-6 py-3.5 text-sm font-semibold text-violet-700 hover:bg-violet-100"
+          >
+            ⚙ Lab controls {controlsOpen ? "▴" : "▾"}
+          </button>
         </div>
+
+        {controlsOpen && (
+          <LabControls
+            state={panel}
+            onChange={setPanel}
+            onApply={rerun}
+            onReset={resetControls}
+          />
+        )}
 
         <div className="mt-10 grid grid-cols-2 gap-6 sm:grid-cols-4">
           <Stat value="5" label="contenders" hint="distinct GTM angles" />

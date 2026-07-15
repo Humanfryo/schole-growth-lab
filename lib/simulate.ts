@@ -82,10 +82,12 @@ export function simulateVisit(
   };
 }
 
-export function samplePersona(rng: RNG): Persona {
+// Personas default to the canonical mixture; a caller (e.g. the Lab Controls
+// panel) may pass an override pool — same ids, different shares/preferences.
+export function samplePersona(rng: RNG, personas: Persona[] = PERSONAS): Persona {
   return rng.pick(
-    PERSONAS,
-    PERSONAS.map((p) => p.share)
+    personas,
+    personas.map((p) => p.share)
   );
 }
 
@@ -95,7 +97,7 @@ export function samplePersona(rng: RNG): Persona {
 // bandit, which deliberately starves losers and so can't characterize them.
 export function sampleBehavior(
   pages: PageSpec[],
-  opts: { seed: number; perPage: number }
+  opts: { seed: number; perPage: number; personas?: Persona[] }
 ): { visits: Visit[]; stats: PageStat[] } {
   const visits: Visit[] = [];
   for (const page of pages) {
@@ -103,7 +105,7 @@ export function sampleBehavior(
     // behavior is identical regardless of what other pages are in the field
     const rng = new RNG(opts.seed ^ hashStringToSeed(page.id));
     for (let i = 0; i < opts.perPage; i++) {
-      const persona = samplePersona(rng);
+      const persona = samplePersona(rng, opts.personas);
       visits.push(simulateVisit(rng, page, persona));
     }
   }
