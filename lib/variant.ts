@@ -334,8 +334,14 @@ export function realizeVariantWithCopy(
   );
 }
 
+// Deterministic fallback subhead when the LLM copywriter is unavailable (no API
+// key). Reuse the primary angle's real, angle-specific hero body — which the
+// preview otherwise never renders (it filters the hero slot out) — so the
+// generated page reads like finished marketing copy, not an internal strategy
+// note. The strategy summary lives in the dashboard's "generated variant" panel
+// (rationale), not on the page itself.
 function subheadFor(plan: VariantPlan): string {
-  return `${ANGLE_LABEL[plan.primaryAngle]} meets ${ANGLE_LABEL[plan.secondaryAngle]} — features chosen by the fitted response model, with a "${CTA_LABEL[plan.cta]}" call to action.`;
+  return HERO_COPY[plan.primaryAngle].body;
 }
 
 // The variant's feature vector is exactly what the optimizer scored — angle
